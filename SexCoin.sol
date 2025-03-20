@@ -1,228 +1,336 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.29;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@chainlink/contracts/src/v0.8/VRFConsumerBase.sol";
-import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/AddressUpgradeable.sol";
 
-contract SexCoin is ERC20, Ownable, ReentrancyGuard, VRFConsumerBase {
-    using SafeERC20 for IERC20;
+contract SexCoin is
+    Initializable,
+    ERC20Upgradeable,
+    AccessControlUpgradeable,
+    OwnableUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    UUPSUpgradeable
+{
+    using AddressUpgradeable for address;
 
-    // Chainlink VRF variables
-    bytes32 internal keyHash;
-    uint256 internal fee;
-    uint256 public randomResult;
-    mapping(bytes32 => address) public requestToSender;
+    // ======================
+    // Estruturas e Variáveis
+    // ======================
 
-    // Chainlink Price Feed
-    mapping(address => address) public tokenPriceFeeds; // Mapeamento de tokens para seus Price Feeds
+    // Endereços dos contratos
+    address public miningContractAddress; // Contrato de mineração
+    address public developmentFundAddress; // Endereço de desenvolvimento
+    address public marketingFundAddress; // Endereço promocional
+    address public liquidityPoolAddress; // Contrato de pool de liquidez
+    address public presaleContractAddress; // Endereço do contrato de presale
+    address public stakeContractAddress; // Endereço do contrato de stake
+    address public nftContractAddress; // Endereço do contrato de NFTs
+    address public governanceContractAddress; // Endereço do contrato de governança
+    address public donationContractAddress; // Endereço do contrato de doações
 
-    // Token distribution settings
+    // Totais de supply
     uint256 public constant TOTAL_SUPPLY = 100_000_000 * 10**18;
-    uint256 public constant CREATOR_SUPPLY = 1_000_000 * 10**18;
-    uint256 public constant DEVELOPMENT_SUPPLY = 1_000_000 * 10**18;
-    uint256 public constant PROMOTIONAL_SUPPLY = 3_000_000 * 10**18;
-    uint256 public constant STAKING_SUPPLY = 10_000_000 * 10**18;
-    uint256 public constant LIQUIDITY_SUPPLY = 5_000_000 * 10**18;
-    uint256 public constant MINING_SUPPLY = 75_000_000 * 10**18;
-    uint256 public constant PRESALE_SUPPLY = 5_000_000 * 10**18;
+    uint256 public constant PRESALE_SUPPLY = 5_000_000 * 10**18; // Para presale (pool de liquidez)
+    uint256 public constant DEVELOPMENT_SUPPLY = 1_000_000 * 10**18; // Para desenvolvimento
+    uint256 public constant MARKETING_SUPPLY = 5_000_000 * 10**18; // Para promoções
+    uint256 public constant CREATOR_TOTAL_SUPPLY = 1_000_000 * 10**18; // Total alocado ao criador
+    uint256 public constant STAKE_SUPPLY = 5_000_000 * 10**18; // Para stake
+    uint256 public constant NFT_SUPPLY = 500_000 * 10**18; // Para NFTs
+    uint256 public constant DONATION_SUPPLY = 2_500_000 * 10**18; // Para doações (governança)
+    uint256 public constant MINING_SUPPLY = 80_000_000 * 10**18; // Para mineração
 
-    // Configurable addresses
-    address public creatorAddress;
-    address public developmentAddress;
-    address public promotionalAddress;
-    address public liquidityPool;
+    // Distribuição para o criador
+    uint256 public constant CREATOR_INITIAL_SUPPLY = 250_000 * 10**18; // 250k na criação
+    uint256 public constant CREATOR_VESTING_SUPPLY = 250_000 * 10**18; // 250k por período de vesting
+    uint256 public constant CREATOR_VESTING_PERIODS = 3; // 3 períodos de vesting
+    uint256 public creatorVestingStartTime;
+    uint256 public creatorVestingCount;
 
-    // Presale variables
-    mapping(address => uint256) public presaleContributions;
-    uint256 public presaleTotalContribution;
-    bool public presaleActive;
+    // Controle de distribuição inicial
+    bool public isInitialSupplyDistributed;
 
-    // Preço fixo de 1 SEX em USDT (0,05 USDT)
-    uint256 public constant SEX_PRICE_USDT = 0.05 * 10**18; // 0,05 USDT com 18 casas decimais
+    // Controle de mineração
+    mapping(address => uint256) public lastMineBlock;
+    mapping(address => uint256) public lastMineTime; // Tempo da última mineração
+    mapping(address => uint256) public minerContributions; // Rastreia as contribuições dos mineradores
+    uint256 public totalMinedTokens; // Total de tokens já minerados
+    uint256 public maxTokensPerBlock; // Limite máximo de tokens minerados por bloco
 
-    // Control variables
-    uint256 private _minedSupply;
-    uint256 private _stakingSupply = STAKING_SUPPLY;
-    uint256 private _liquiditySupply = LIQUIDITY_SUPPLY;
+    // Rastreamento de tokens queimados
+    uint256 public burnedSupply;
 
-    // Staking and HODLing
-    struct StakingInfo {
-        uint256 amount;
-        uint256 stakingStartTime;
-    }
-    mapping(address => StakingInfo) public stakingBalances;
-    uint256 public constant STAKING_APY = 10;
-    uint256 public constant HODLING_APY = 5;
-    uint256 public constant SECONDS_IN_YEAR = 31536000;
+    // Taxa de queima (1% por padrão)
+    uint256 public burnRate; // Taxa de queima em porcentagem (1 = 1%)
+    uint256 public constant MAX_BURN_RATE = 10; // Taxa máxima de queima (10%)
 
-    // Mining
-    uint256 public constant INITIAL_MINING_RATE = 50 * 10**18;
-    uint256 private _miningRate;
-    uint256 private _lastHalvingTimestamp;
-    uint256 private _miningDifficulty;
-    mapping(address => uint256) private _lastMiningTimestamp;
-    mapping(address => uint256) private _minedTokens;
-    uint256 public constant MAX_TOKENS_PER_ADDRESS = 1000 * 10**18;
+    // Lista de implementações aprovadas para upgrades
+    mapping(address => bool) public approvedImplementations;
 
-    // Liquidity
-    uint256 public constant LIQUIDITY_FEE_PERCENT = 2;
+    // Controle de upgrades
+    uint256 public upgradeDelay = 1 days;
+    mapping(address => uint256) public upgradeRequestTime;
+    mapping(address => bool) public upgradeConfirmed; // Confirmação de upgrade
 
-    // Staking commit-reveal
-    struct StakingCommit {
-        uint256 amount;
-        uint256 commitTime;
-        bool revealed;
-    }
-    mapping(address => StakingCommit) public stakingCommits;
-    uint256 public constant COMMIT_REVEAL_DELAY = 1 minutes;
+    // Tempo mínimo entre tentativas de mineração
+    uint256 public constant MINING_COOLDOWN = 10 minutes;
 
-    // Gamification
-    mapping(address => uint256) public miningPoints;
-    uint256 public constant POINTS_PER_MINE = 10;
+    // Eventos
+    event TokensMined(address indexed miner, uint256 amount);
+    event TokensBurned(address indexed burner, uint256 amount);
+    event InitialSupplyDistributed(
+        address indexed miningContract,
+        address indexed developmentFund,
+        address indexed marketingFund,
+        address presaleContract,
+        address stakeContract,
+        address nftContract,
+        address governanceContract,
+        address donationContract
+    );
+    event CreatorTokensWithdrawn(address indexed creator, uint256 amount);
+    event DonationSent(address indexed donationContract, uint256 amount);
+    event ContractInitialized(uint8 contractType, address contractAddress);
+    event ContractAddressUpdated(uint8 contractType, address newAddress);
+    event GovernanceTransferred(address indexed governanceContract);
+    event ImplementationApproved(address indexed implementation);
+    event UpgradeRequested(address indexed newImplementation, uint256 requestTime);
+    event BurnRateUpdated(uint256 newBurnRate);
+    event MaxTokensPerBlockUpdated(uint256 newMaxTokensPerBlock);
 
-    // NFTs
-    uint256 public constant INITIAL_NFT_SUPPLY = 10_000;
-    uint256 public constant EXTENDED_NFT_SUPPLY = 40_000;
-    uint256 private _nextTokenId = 1;
-    mapping(uint256 => string) private _tokenURIs;
-    mapping(uint256 => address) private _owners;
-    uint256 public constant NFT_MINT_COST = 100 * 10**18;
-    uint256 public constant NFT_DEVELOPMENT_FEE_PERCENT = 3;
-    uint256 public constant NFT_LIQUIDITY_FEE_PERCENT = 97;
+    // Papéis de controle de acesso
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
-    // Events
-    event NFTMinted(address indexed to, uint256 indexed tokenId, string tokenURI);
-    event PresaleContribution(address indexed contributor, address indexed token, uint256 amount, uint256 tokens);
-    event RandomNumberRequested(bytes32 requestId);
-    event RandomNumberReceived(bytes32 requestId, uint256 randomNumber);
-    event GasPriceAdjusted(uint256 oldPrice, uint256 newPrice);
-    event StakingStarted(address indexed user, uint256 amount);
-    event StakingEnded(address indexed user, uint256 amount, uint256 rewards);
-    event TokenPriceFeedSet(address indexed token, address indexed priceFeed);
-
-    // Mapping to limit transfers per address
-    mapping(address => uint256) public lastTransferTimestamp;
-    uint256 public constant TRANSFER_COOLDOWN = 1 minutes;
-
-    // Minimum gas price
-    uint256 public minGasPrice;
-
-    constructor(
-        address _creatorAddress,
-        address _developmentAddress,
-        address _promotionalAddress,
-        address _vrfCoordinator,
-        address _linkToken,
-        bytes32 _keyHash,
-        uint256 _fee,
-        address _defaultPriceFeed // Endereço do Chainlink Price Feed padrão (USDT/USDT)
-    ) ERC20("Sex Coin", "SEX") VRFConsumerBase(_vrfCoordinator, _linkToken) Ownable(msg.sender) {
-        require(_creatorAddress != address(0), "Invalid creator address");
-        require(_developmentAddress != address(0), "Invalid development address");
-        require(_promotionalAddress != address(0), "Invalid promotional address");
-
-        creatorAddress = _creatorAddress;
-        developmentAddress = _developmentAddress;
-        promotionalAddress = _promotionalAddress;
-
-        // Initialize Chainlink VRF
-        keyHash = _keyHash;
-        fee = _fee;
-
-        // Define o Price Feed padrão (USDT/USDT)
-        tokenPriceFeeds[address(0)] = _defaultPriceFeed; // address(0) representa MATIC/POL
-
-        // Mint initial tokens
-        _mint(creatorAddress, CREATOR_SUPPLY);
-        _mint(developmentAddress, DEVELOPMENT_SUPPLY);
-        _mint(promotionalAddress, PROMOTIONAL_SUPPLY);
-        _mint(address(this), STAKING_SUPPLY + LIQUIDITY_SUPPLY + PRESALE_SUPPLY);
-
-        // Initialize mining variables
-        _lastHalvingTimestamp = block.timestamp;
-        _miningRate = INITIAL_MINING_RATE;
-        _miningDifficulty = 1 minutes;
-
-        // Set a default minimum gas price
-        minGasPrice = 10 gwei;
-
-        // Activate presale
-        presaleActive = true;
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
     }
 
-    // ===================== CHAINLINK VRF =====================
-    function fulfillRandomness(bytes32 requestId, uint256 randomness) internal override {
-        require(randomness > 0, "Invalid random number");
-        randomResult = randomness; // Armazena o número aleatório
-        emit RandomNumberReceived(requestId, randomness); // Emite um evento
+    // ======================
+    // Inicialização
+    // ======================
+
+    /**
+     * @dev Inicializa o contrato principal.
+     */
+    function initialize() public initializer {
+        require(msg.sender == tx.origin, unicode"Contratos não podem chamar initialize");
+
+        __ERC20_init("Sex Coin", "SEX");
+        __AccessControl_init();
+        __Ownable_init(msg.sender);
+        __Pausable_init();
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(MINTER_ROLE, msg.sender);
+        _grantRole(PAUSER_ROLE, msg.sender);
+
+        // Define a taxa de queima inicial (1%)
+        burnRate = 1;
+
+        // Define o limite máximo de tokens minerados por bloco
+        maxTokensPerBlock = 1000 * 10**18;
+
+        // Distribuição inicial de tokens para o criador
+        _mint(msg.sender, CREATOR_INITIAL_SUPPLY);
+        creatorVestingStartTime = block.timestamp;
+        creatorVestingCount = 0;
     }
 
-    // ===================== PRESALE =====================
-    function setTokenPriceFeed(address token, address priceFeed) public onlyOwner {
-        require(token != address(0), "Invalid token address");
-        require(priceFeed != address(0), "Invalid price feed address");
+    // ======================
+    // Funções de Distribuição
+    // ======================
 
-        tokenPriceFeeds[token] = priceFeed;
-        emit TokenPriceFeedSet(token, priceFeed);
+    /**
+     * @dev Distribui o fornecimento inicial de tokens para os contratos auxiliares.
+     */
+    function distributeInitialSupply() external onlyOwner {
+        require(!isInitialSupplyDistributed, unicode"Distribuição já realizada");
+
+        require(miningContractAddress.isContract(), unicode"Contrato de mineração inválido");
+        require(developmentFundAddress.isContract(), unicode"Contrato de desenvolvimento inválido");
+        require(marketingFundAddress.isContract(), unicode"Contrato de marketing inválido");
+        require(stakeContractAddress.isContract(), unicode"Contrato de stake inválido");
+        require(nftContractAddress.isContract(), unicode"Contrato de NFTs inválido");
+        require(donationContractAddress.isContract(), unicode"Contrato de doações inválido");
+        require(presaleContractAddress.isContract(), unicode"Contrato de presale inválido");
+
+        _mint(developmentFundAddress, DEVELOPMENT_SUPPLY);
+        _mint(marketingFundAddress, MARKETING_SUPPLY);
+        _mint(stakeContractAddress, STAKE_SUPPLY);
+        _mint(nftContractAddress, NFT_SUPPLY);
+        _mint(donationContractAddress, DONATION_SUPPLY);
+        _mint(miningContractAddress, MINING_SUPPLY);
+        _mint(presaleContractAddress, PRESALE_SUPPLY);
+
+        isInitialSupplyDistributed = true;
+
+        emit InitialSupplyDistributed(
+            miningContractAddress,
+            developmentFundAddress,
+            marketingFundAddress,
+            presaleContractAddress,
+            stakeContractAddress,
+            nftContractAddress,
+            governanceContractAddress,
+            donationContractAddress
+        );
     }
 
-    function getTokenPriceUSDT(address token) internal view returns (uint256) {
-        // Obtém o endereço do Price Feed para o token
-        address priceFeedAddress = tokenPriceFeeds[token];
-        require(priceFeedAddress != address(0), "Price feed not set for token");
+    // ======================
+    // Funções de Mineração
+    // ======================
 
-        // Obtém o preço do token em relação ao USDT
-        AggregatorV3Interface priceFeed = AggregatorV3Interface(priceFeedAddress);
-        (, int256 price, , , ) = priceFeed.latestRoundData();
-        require(price > 0, "Invalid price");
+    /**
+     * @dev Função para minerar novos tokens (modelo semelhante ao Bitcoin).
+     */
+    function mineTokens(uint256 amount) external onlyRole(MINTER_ROLE) nonReentrant whenNotPaused {
+        require(amount > 0, unicode"Quantidade deve ser maior que zero");
+        require(totalSupply() + burnedSupply + amount <= TOTAL_SUPPLY, unicode"Excede o fornecimento total, considere tokens queimados");
+        require(block.number > lastMineBlock[msg.sender], unicode"Espere o próximo bloco");
 
-        // Retorna o preço com 18 casas decimais
-        return uint256(price);
-    }
+        // Verifica se o minerador contribuiu para a rede
+        require(minerContributions[msg.sender] > 0, unicode"Contribuição insuficiente para minerar");
 
-    function contributeToPresale(address token, uint256 amount) public payable nonReentrant {
-        require(presaleActive, "Presale is not active");
-        require(amount > 0, "Amount must be greater than 0");
+        // Verifica o tempo mínimo entre minerações
+        require(block.timestamp >= lastMineTime[msg.sender] + MINING_COOLDOWN, unicode"Espere antes de minerar novamente");
 
-        // Obtém o valor do token em relação ao USDT
-        uint256 tokenPriceUSDT = getTokenPriceUSDT(token);
-        require(tokenPriceUSDT > 0, "Invalid token price");
+        uint256 currentBlock = block.number;
+        uint256 halvingInterval = 210_000; // Ajuste o intervalo de halving
+        uint256 halvingCount = currentBlock / halvingInterval;
+        uint256 reward = 50 * 10**18 / (2 ** halvingCount); // Recompensa inicial de 50 tokens, reduzida pela metade a cada halving
 
-        // Calcula o valor total em USDT
-        uint256 totalValueUSDT = (amount * tokenPriceUSDT) / 10**18;
+        // Definir um mínimo de 0.1 SEX
+        uint256 minReward = 0.1 * 10**18;
+        reward = reward < minReward ? minReward : reward;
 
-        // Calcula a quantidade de SEX a ser distribuída (1 SEX = 0,05 USDT)
-        uint256 tokens = (totalValueUSDT * 10**18) / SEX_PRICE_USDT;
-        require(presaleTotalContribution + tokens <= PRESALE_SUPPLY, "Presale supply exhausted");
+        require(amount <= reward, unicode"Excede a recompensa atual de mineração");
+        require(amount <= maxTokensPerBlock, unicode"Excede o limite de tokens por bloco");
+        require(totalMinedTokens + amount <= MINING_SUPPLY, unicode"Limite de mineração atingido");
 
-        // Transfere os tokens do usuário para o contrato
-        if (token == address(0)) {
-            // Se o token for MATIC/POL, use msg.value
-            require(msg.value == amount, "Invalid MATIC amount");
-            payable(address(this)).transfer(msg.value);
-        } else {
-            // Se for um token ERC20, transfira normalmente
-            IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        // Aplica a taxa de queima
+        uint256 burnAmount = (amount * burnRate) / 100;
+        if (burnAmount > 0) {
+            _burn(msg.sender, burnAmount);
+            burnedSupply += burnAmount;
+            emit TokensBurned(msg.sender, burnAmount);
         }
 
-        // Atualiza as contribuições da Presale
-        presaleContributions[msg.sender] += tokens;
-        presaleTotalContribution += tokens;
-
-        // Transfere os tokens SEX para o contribuidor
-        _transfer(address(this), msg.sender, tokens);
-
-        emit PresaleContribution(msg.sender, token, amount, tokens);
+        lastMineBlock[msg.sender] = block.number;
+        lastMineTime[msg.sender] = block.timestamp;
+        totalMinedTokens += amount;
+        _mint(msg.sender, amount - burnAmount);
+        emit TokensMined(msg.sender, amount - burnAmount);
     }
 
-    function endPresale() public onlyOwner {
-        presaleActive = false;
+    /**
+     * @dev Define o limite máximo de tokens minerados por bloco.
+     */
+    function setMaxTokensPerBlock(uint256 newMaxTokensPerBlock) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newMaxTokensPerBlock > 0, unicode"O limite deve ser maior que zero");
+        maxTokensPerBlock = newMaxTokensPerBlock;
+        emit MaxTokensPerBlockUpdated(newMaxTokensPerBlock);
     }
 
-    // ===================== OUTRAS FUNÇÕES =====================
-    // (O restante do código permanece inalterado)
+    // ======================
+    // Funções de Vesting
+    // ======================
+
+    /**
+     * @dev Função para o criador sacar tokens vesting.
+     */
+    function withdrawCreatorTokens() external nonReentrant {
+        require(msg.sender == owner(), unicode"Apenas o criador pode sacar");
+        require(creatorVestingCount < CREATOR_VESTING_PERIODS, unicode"Todos os tokens vesting já foram sacados");
+        require(totalSupply() + burnedSupply + CREATOR_VESTING_SUPPLY <= TOTAL_SUPPLY, unicode"Excede o fornecimento total, considere tokens queimados");
+        require(creatorVestingStartTime > 0, unicode"Vesting ainda não iniciou");
+
+        uint256 nextVestingTime = creatorVestingStartTime + (creatorVestingCount + 1) * 365 days;
+        require(block.timestamp >= nextVestingTime, 
+            string(abi.encodePacked("Aguarde ", (nextVestingTime - block.timestamp) / 1 days, " dias")));
+
+        // Proteção contra overflow
+        require(creatorVestingCount + 1 > creatorVestingCount, unicode"Overflow no contador de vesting");
+
+        creatorVestingCount++;
+        _mint(msg.sender, CREATOR_VESTING_SUPPLY);
+        emit CreatorTokensWithdrawn(msg.sender, CREATOR_VESTING_SUPPLY);
+    }
+
+    // ======================
+    // Funções de Queima de Tokens
+    // ======================
+
+    /**
+     * @dev Função para queimar tokens.
+     */
+    function burn(uint256 amount) external nonReentrant {
+        require(amount > 0, unicode"Quantidade deve ser maior que zero");
+        require(balanceOf(msg.sender) >= amount, unicode"Saldo insuficiente");
+
+        _burn(msg.sender, amount);
+        burnedSupply += amount;
+        emit TokensBurned(msg.sender, amount);
+    }
+
+    /**
+     * @dev Define a taxa de queima.
+     */
+    function setBurnRate(uint256 newBurnRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newBurnRate <= MAX_BURN_RATE, unicode"Taxa de queima excede o limite máximo");
+        burnRate = newBurnRate;
+        emit BurnRateUpdated(newBurnRate);
+    }
+
+    // ======================
+    // Funções de Upgrade
+    // ======================
+
+    /**
+     * @dev Adiciona uma implementação à lista de aprovadas para upgrades.
+     */
+    function approveImplementation(address newImplementation) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newImplementation.isContract(), unicode"Endereço inválido");
+        approvedImplementations[newImplementation] = true;
+        emit ImplementationApproved(newImplementation);
+    }
+
+    /**
+     * @dev Função para solicitar um upgrade.
+     */
+    function requestUpgrade(address newImplementation) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newImplementation.isContract(), unicode"Endereço inválido");
+        upgradeRequestTime[newImplementation] = block.timestamp;
+        upgradeConfirmed[newImplementation] = false; // Requer confirmação
+        emit UpgradeRequested(newImplementation, block.timestamp);
+    }
+
+    /**
+     * @dev Confirma um upgrade após o período de espera.
+     */
+    function confirmUpgrade(address newImplementation) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(approvedImplementations[newImplementation], unicode"Upgrade não autorizado");
+        require(block.timestamp >= upgradeRequestTime[newImplementation] + upgradeDelay, unicode"Tempo de espera não concluído");
+        upgradeConfirmed[newImplementation] = true;
+    }
+
+    /**
+     * @dev Função interna para autorizar upgrades. Apenas o DEFAULT_ADMIN_ROLE pode realizar upgrades.
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) view {
+        require(approvedImplementations[newImplementation], unicode"Upgrade não autorizado");
+        require(upgradeConfirmed[newImplementation], unicode"Upgrade não confirmado");
+    }
 }
+
+
